@@ -1,0 +1,8 @@
+# BASE_IMAGE is explicitly resolved to a digest by CI/local build instructions.
+# Fedora package versions intentionally refresh for security updates; their exact
+# installed NEVRAs are recorded in the image. Source pins remain checksum-locked.
+# /etc/os-release exists in the build image, not on the lint host.
+ignored:
+  - DL3006
+  - DL3041
+  - SC1091

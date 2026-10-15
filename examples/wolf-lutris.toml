@@ -1,0 +1,39 @@
+# Separate test launcher; do not paste over a live profile without backup/review.
+# Replace BOTH host mount paths; reuse the old /var/lutris mapping for migration.
+[[apps]]
+title = "Lutris"
+start_virtual_compositor = true
+# render_node = "/dev/dri/renderD128" # match the actual Wolf host
+
+[apps.runner]
+type = "docker"
+name = "WolfLutris"
+image = "ghcr.io/joshcollis/wolf-lutris:latest"
+mounts = [
+  "/absolute/path/to/profile-lutris-home:/home/retro:rw",
+  "/absolute/path/to/profile-lutris-games:/var/lutris:rw",
+]
+# Enabled by owner choice: native Clone Hero needs the ALSA sequencer to avoid
+# its bundled RtMidi crash. This exposes host MIDI client/port information.
+# The host node must exist; no fake devices or automatic host module loading.
+devices = ["/dev/snd/seq:/dev/snd/seq:rw"]
+ports = []
+env = [
+  "PUID=1000", "PGID=1000", "UNAME=lutris", "HOME=/home/retro",
+  "TZ=UTC", "UMASK=022",
+  "PULSE_SERVER=unix:/run/user/wolf/pulse-socket",
+  "GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/uinput /dev/snd/seq",
+]
+# Wolf supplies negotiated mode/env, Wayland/Pulse sockets, input/GPU/udev mounts.
+# Keep private IPC. Only the sequencer is exposed, not all of /dev/snd.
+# No blanket SYS_ADMIN or sandbox disabling. Some GE-Proton namespace runtimes
+# need a separately reviewed target-host policy; standard native/Wine paths differ.
+base_create_json = '''
+{
+  "HostConfig": {
+    "Privileged": false,
+    "ShmSize": 1073741824,
+    "DeviceCgroupRules": ["c 13:* rmw"]
+  }
+}
+'''

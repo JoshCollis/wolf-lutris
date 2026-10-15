@@ -1,0 +1,105 @@
+name: Build, test and publish image
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  image:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      image: ${{ steps.base.outputs.image_name }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Lint and unit tests
+        run: |
+          bash tests/lint.sh
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Free unused hosted-runner SDK space
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf -- /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h .
+      - name: Resolve current official base to immutable digest
+        id: base
+        env:
+          BASE: ghcr.io/games-on-whales/base-app:fedora
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          docker pull "$BASE"
+          reference=$(docker image inspect "$BASE" --format '{{index .RepoDigests 0}}')
+          echo "BASE_IMAGE=$reference" >> "$GITHUB_ENV"
+          echo "BASE_DIGEST=${reference#*@}" >> "$GITHUB_ENV"
+          echo "image_name=ghcr.io/${REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Build runtime and disposable test target
+        env:
+          SOURCE: https://github.com/${{ github.repository }}
+          REVISION: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          docker build --target runtime --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            --build-arg BASE_DIGEST="$BASE_DIGEST" --build-arg IMAGE_SOURCE="$SOURCE" \
+            --build-arg IMAGE_REVISION="$REVISION" -t wolf-lutris:local-review .
+          docker build --target test --build-arg BASE_IMAGE="$BASE_IMAGE" \
+            --build-arg BASE_DIGEST="$BASE_DIGEST" --build-arg IMAGE_SOURCE="$SOURCE" \
+            --build-arg IMAGE_REVISION="$REVISION" -t wolf-lutris:test .
+      - name: Runtime contract and software integration checks
+        run: |
+          bash tests/run.sh wolf-lutris:test
+          bash tests/runtime-image.sh wolf-lutris:local-review
+      - name: Retain software acceptance logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: acceptance-evidence
+          path: artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Export exact tested runtime
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: docker save wolf-lutris:local-review | gzip > tested-image.tar.gz
+      - name: Retain runtime for publisher
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tested-image
+          path: tested-image.tar.gz
+          compression-level: 0
+          retention-days: 1
+  publish:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: tested-image
+      - name: Load tested runtime without rebuilding
+        run: docker load --input tested-image.tar.gz
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish latest and immutable run tags
+        env:
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: |
+          set -euo pipefail
+          for tag in latest "sha-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"; do
+            docker tag wolf-lutris:local-review "$IMAGE:$tag"
+            docker push "$IMAGE:$tag"
+          done
