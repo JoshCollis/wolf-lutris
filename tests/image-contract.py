@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run against the exact runtime image, not the dependency-enriched test stage."""
 import ctypes
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,18 @@ def run(*args):
     return p.stdout + p.stderr
 
 
+def require_supported_release(release):
+    assert release['ID'].strip('"') == 'fedora', release
+    assert datetime.now(timezone.utc).date() < datetime.strptime(release['SUPPORT_END'].strip('"'), '%Y-%m-%d').date(), release
+
+
+def require_minimum_version(package, minimum):
+    version = run('rpm', '-q', '--qf', '%{VERSION}', package).strip()
+    assert re.fullmatch(r'[0-9][0-9A-Za-z.+~_-]*', version), version
+    comparison = run('rpm', '--eval', f'%{{lua: print(rpm.vercmp("{version}", "{minimum}"))}}')
+    assert int(comparison.strip()) >= 0, (package, version, minimum)
+
+
 def main():
     # Refuse a stale tag: host-side unit tests must correspond to baked scripts.
     expected_root = Path('/expected')
@@ -25,7 +38,7 @@ def main():
         assert (expected_root / relative).read_bytes() == Path('/' + relative).read_bytes(), f'Stale image file: {relative}'
     assert not Path('/etc/cont-init.d/init-gamescope.sh').exists(), 'Unused gamescope user/group hook retained'
     release = dict(line.split('=', 1) for line in Path('/etc/os-release').read_text().splitlines() if '=' in line)
-    assert release['ID'].strip('"') == 'fedora' and release['VERSION_ID'].strip('"') == '44', release
+    require_supported_release(release)
     for exe in ('lutris', 'openbox', 'wine', 'dbus-run-session', 'xauth', 'xdpyinfo', 'xrandr', 'pactl', 'aplay', 'gosu'):
         assert shutil.which(exe), exe
     # Lutris constructs its GTK application before parsing --version, and
@@ -33,8 +46,10 @@ def main():
     # the headless test launches the real UI as the application UID.
     versions = {'lutris': run('rpm', '-q', '--qf', '%{VERSION}', 'lutris')}
     versions.update({exe: run(exe, '--version') for exe in ('openbox', 'wine')})
-    assert re.search(r'\b0\.5\.22\b', versions['lutris']), versions
-    assert re.search(r'wine-11\.', versions['wine']), versions
+    # Preserve the reviewed baseline without rejecting later supported updates.
+    # These floors do not assert that the installed packages are upstream latest.
+    for package, minimum in (('lutris', '0.5.22'), ('wine-core.x86_64', '11.0')):
+        require_minimum_version(package, minimum)
     xwayland = '/usr/local/libexec/wolf-lutris/Xwayland'
     assert '24.1.14' in run(xwayland, '-version')
     for arch, cls in (('/usr/lib64', 2), ('/usr/lib', 1)):
